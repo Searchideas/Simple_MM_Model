@@ -12,7 +12,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 Exchange = "binance-futures"
 
 # Local symbols used by download and convert
-Symbols = ["xauusdt", "xautusdt", "paxgusdt", "btcusdt", "suiusdt"]
+Symbols = ["adausdt", "dogeusdt","suiusdt"]
 
 # Tardis dataset symbol ids per exchange
 SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
@@ -22,6 +22,8 @@ SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
         "paxgusdt": "PAXGUSDT",
         "btcusdt": "BTCUSDT",
         "suiusdt": "SUIUSDT",
+        "adausdt": "ADAUSDT",
+        "dogeusdt": "DOGEUSDT",
     },
     "gate-io-futures": {
         "xauusdt": "XAU_USDT",
@@ -29,6 +31,8 @@ SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
         "paxgusdt": "PAXG_USDT",
         "btcusdt": "BTC_USDT",
         "suiusdt": "SUI_USDT",
+        "adausdt": "ADA_USDT",
+        "dogeusdt": "DOGE_USDT",
     },
     # Bybit linear USDT perpetuals (not inverse *PERP, not dated futures)
     "bybit": {
@@ -37,6 +41,8 @@ SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
         "paxgusdt": "PAXGUSDT",
         "btcusdt": "BTCUSDT",
         "suiusdt": "SUIUSDT",
+        "adausdt": "ADAUSDT",
+        "dogeusdt": "DOGEUSDT",
     },
 }
 

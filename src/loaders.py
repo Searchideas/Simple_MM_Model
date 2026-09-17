@@ -137,6 +137,69 @@ def aligned_mids(symbols: list[str], from_date: str, to_date: str, every: str = 
     return out.sort("ts").with_columns(pl.exclude("ts").forward_fill()).drop_nulls()
 
 
+def available_dates(symbol: str, data_type: str = "book_snapshot_25") -> list[str]:
+    """Return sorted YYYY-MM-DD dates that have parquet for this symbol."""
+    folder = config.PARQUET_DIR / symbol.lower() / data_type
+    dates: list[str] = []
+    if not folder.exists():
+        return dates
+    for path in sorted(folder.glob("*.parquet")):
+        match = DATE_RE.search(path.name)
+        if match and match.group(1) not in dates:
+            dates.append(match.group(1))
+    return dates
+
+
+def resolve_date_range(
+    symbol: str,
+    date: str = "all",
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> tuple[str, str, list[str]]:
+    """Resolve CLI dates to an inclusive [from, to] range and the list of days."""
+    days = available_dates(symbol)
+    if not days:
+        raise FileNotFoundError(f"No parquet dates for {symbol}")
+    start = from_date or (days[0] if date == "all" else date)
+    end = to_date or (days[-1] if date == "all" else date)
+    picked = [day for day in days if start <= day <= end]
+    if not picked:
+        raise FileNotFoundError(f"No parquet for {symbol} in [{start}, {end}]")
+    return picked[0], picked[-1], picked
+
+
+def load_trades_range(symbol: str, from_date: str, to_date: str) -> pl.DataFrame:
+    files = daily_files(symbol, "trades", from_date, to_date)
+    if not files:
+        raise FileNotFoundError(f"No trades for {symbol} in [{from_date}, {to_date}]")
+    frames = [
+        pl.read_parquet(path, columns=TRADES_PARQUET_COLS).select(
+            pl.col("local_timestamp").alias("ts"),
+            "price",
+            "amount",
+            "side",
+        )
+        for path in files
+    ]
+    return pl.concat(frames).sort("ts")
+
+
+def load_bbo_range(symbol: str, from_date: str, to_date: str, every: str | None = None) -> pl.DataFrame:
+    """Load books for a date range. ``every`` resamples (needed for multi-day)."""
+    if every:
+        return bbo_grid(symbol, from_date, to_date, every=every)
+    days = [
+        day
+        for day in available_dates(symbol)
+        if from_date <= day <= to_date
+    ]
+    if not days:
+        raise FileNotFoundError(f"No book for {symbol} in [{from_date}, {to_date}]")
+    if len(days) == 1:
+        return load_bbo_day(symbol, days[0])
+    return bbo_grid(symbol, from_date, to_date, every="1s")
+
+
 def load_trades_day(symbol: str, date: str) -> pl.DataFrame:
     files = daily_files(symbol, "trades", date, date)
     if not files:

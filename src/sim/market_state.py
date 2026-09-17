@@ -70,6 +70,8 @@ class PositionState:
     buy_quantity: float = 0.0
     sell_quantity: float = 0.0
     cash: float = 0.0
+    avg_entry_price: float = 0.0
+    realized_pnl: float = 0.0
 
     @property
     def vwap_buy_price(self) -> float:
@@ -84,3 +86,13 @@ class PositionState:
         if self.sell_quantity == 0:
             return 0.0
         return self.sell_notional / self.sell_quantity
+
+    def unrealized_pnl(self, mid_price: float) -> float:
+        """Open inventory marked vs average entry (fees already in realized/cash)."""
+        if self.inventory == 0.0 or self.avg_entry_price <= 0.0:
+            return 0.0
+        return self.inventory * (mid_price - self.avg_entry_price)
+
+    def marked_pnl(self, mid_price: float) -> float:
+        """Total equity: cash + inventory at mid (= realized + unrealized)."""
+        return self.cash + self.inventory * mid_price
