@@ -18,11 +18,15 @@ from .sweep import SweepRow
 
 
 AS_FORMULA = """
-r = mid - q_frac*skew*tick + book_shift + ma_shift
-d = clip(AS+vol, min_spread/fee_floor, max_spread_ticks*tick)
-skew moves center up to +/- skew_ticks (buy/sell tilt)
-Flat QUOTE: drop toxic OBI / fade MA side
-Pos: WAIT_TP entry+/-fee | TP/FLATTEN join best
+r = mid - q * gamma * sigma_price^2 * (T-t)
+T-t = seconds to next 8h funding
+sigma_price = mid * sigma   (Price / sqrt(s))
+sigma^2 units: (Price)^2 / second
+fit: lambda=A e^{-kappa_ticks * delta_ticks}
+AS uses kappa_$ = kappa_ticks / tick
+d = gamma*sigma_price^2*(T-t) + (2/gamma)*ln(1+gamma/kappa_$)
+d clipped to [min_spread, max_spread_ticks*tick]
+maker: bid<=best_ask-tick, ask>=best_bid+tick (improve OK, no take)
 """
 
 
@@ -104,14 +108,9 @@ class BacktestTUI:
         state.add_row("Our ask", f"{quote.ask:.8f}" + ("" if getattr(quote, "ask_enabled", True) else " OFF"))
         state.add_row("Action", getattr(quote, "action", "QUOTE"))
         state.add_row("Reservation", f"{quote.reservation_price:.8f}")
-        state.add_row("VWAP bid", f"{getattr(quote, 'vwap_bid', 0.0):.8f}")
-        state.add_row("VWAP ask", f"{getattr(quote, 'vwap_ask', 0.0):.8f}")
-        state.add_row("Book shift", f"{getattr(quote, 'book_shift', 0.0):+.8f}")
-        state.add_row("MA shift", f"{getattr(quote, 'ma_shift', 0.0):+.8f}")
-        state.add_row("MA frac", f"{getattr(quote, 'ma_frac', 0.0):+.3f}")
-        state.add_row("VWAP shift", f"{getattr(quote, 'book_vwap_shift', 0.0):+.8f}")
-        state.add_row("Size shift", f"{getattr(quote, 'book_size_shift', 0.0):+.8f}")
-        state.add_row("Book imb I", f"{getattr(quote, 'book_imbalance', 0.0):+.4f}")
+        state.add_row("T-t funding s", f"{getattr(quote, 'tau_seconds', 0.0):.0f}")
+        state.add_row("Vol spread", f"{getattr(quote, 'vol_spread', 0.0):.8f}")
+        state.add_row("Kappa spread", f"{getattr(quote, 'kappa_spread', 0.0):.8f}")
         state.add_row("Our spread", f"{quote.spread:.8f}")
         state.add_row("Status", "PAUSED" if self._paused else "RUNNING")
 
@@ -214,12 +213,8 @@ class BacktestTUI:
         model = self.parameters
         quote = snapshot.quote
         if model is not None:
-            params.add_row("gamma (base)", f"{model.base_gamma:.6g}")
-            params.add_row("gamma_eff", f"{getattr(quote, 'gamma', model.base_gamma):.6g}")
-            params.add_row("kappa (base)", f"{model.kappa:.6g}")
-            params.add_row("kappa_eff", f"{getattr(quote, 'kappa', model.kappa):.6g}")
-            params.add_row("imbalance", f"{getattr(quote, 'imbalance', 0.0):.3f}")
-            params.add_row("1m returns", str(len(model.returns_1m)))
+            params.add_row("gamma", f"{getattr(quote, 'gamma', model.base_gamma):.6g}")
+            params.add_row("kappa_ticks", f"{getattr(quote, 'kappa', model.kappa):.6g}")
             params.add_row("horizon (s)", f"{model.time_horizon:.6g}")
             params.add_row("min_spread", f"{model.min_spread:.8f}")
             params.add_row(
@@ -227,37 +222,15 @@ class BacktestTUI:
                 f"{getattr(model, 'max_spread_ticks', 10):.6g}",
             )
             params.add_row("tick_size", f"{model.tick_size:.8f}")
-            params.add_row("skew_ticks", f"{getattr(model, 'max_skew_ticks', 0):.6g}")
             params.add_row(
-                "book_skew_ticks",
-                f"{getattr(model, 'book_skew_ticks', 0):.6g}",
+                "include_kappa_spread",
+                str(getattr(model, "include_kappa_spread", True)),
             )
-            params.add_row(
-                "book_skew_w",
-                f"{getattr(model, 'book_skew_size_weight', 0.75):.3f}",
-            )
-            params.add_row(
-                "ma_fast/slow",
-                f"{getattr(model, 'ma_fast', 7)}/{getattr(model, 'ma_slow', 25)}",
-            )
-            params.add_row(
-                "ma_skew_ticks",
-                f"{getattr(model, 'ma_skew_ticks', 0):.6g}",
-            )
-            params.add_row("ma_shift", f"{getattr(quote, 'ma_shift', 0.0):+.8f}")
-            params.add_row("ma_frac", f"{getattr(quote, 'ma_frac', 0.0):+.3f}")
+            params.add_row("tau_funding_s", f"{getattr(quote, 'tau_seconds', 0.0):.0f}")
+            params.add_row("vol_spread", f"{getattr(quote, 'vol_spread', 0.0):.8f}")
+            params.add_row("kappa_spread", f"{getattr(quote, 'kappa_spread', 0.0):.8f}")
             params.add_row("action", getattr(quote, "action", "QUOTE"))
-            params.add_row("VWAP bid", f"{getattr(quote, 'vwap_bid', 0.0):.8f}")
-            params.add_row("VWAP ask", f"{getattr(quote, 'vwap_ask', 0.0):.8f}")
-            params.add_row(
-                "book_shift",
-                f"{getattr(quote, 'book_shift', 0.0):+.8f}",
-            )
-            params.add_row(
-                "book_imb I",
-                f"{getattr(quote, 'book_imbalance', 0.0):+.3f}",
-            )
-            params.add_row("spread unit", "ticks")
+            params.add_row("spread unit", "price")
 
         if self.maker_fee is not None:
             params.add_row("maker_fee", f"{self.maker_fee:.6g}")
@@ -282,29 +255,8 @@ class BacktestTUI:
         return params
 
     def _render_equity_curve(self) -> str:
-        """Render a compact equity curve without a Rich sparkline dependency."""
-        values = self._equity_curve or [0.0]
-        values = values[-60:]
-        levels = ".:-=+*#@"
-        minimum = min(values)
-        maximum = max(values)
-
-        if maximum == minimum:
-            return levels[0] * len(values)
-
-        return "".join(
-            levels[
-                min(
-                    len(levels) - 1,
-                    int(
-                        (value - minimum)
-                        / (maximum - minimum)
-                        * (len(levels) - 1)
-                    ),
-                )
-            ]
-            for value in values
-        )
+        """Live equity line (recent samples)."""
+        return _ascii_equity(self._equity_curve[-120:] or [0.0], width=36, height=8)
 
     def _record_activity(self, snapshot: BacktestSnapshot) -> None:
         """Add newly observed public trades and our fills to the activity box."""
@@ -396,9 +348,7 @@ class SweepPicker:
         status = (
             f"Running {index}/{total}  "
             f"γ={combo.gamma:g} κ={combo.kappa:g} min={combo.min_spread:g} "
-            f"max_sp={combo.max_spread_ticks:g} inv={combo.max_inventory:g} "
-            f"skew={combo.skew_ticks:g} book={combo.book_skew_ticks:g} "
-            f"w={combo.book_skew_size_weight:g}"
+            f"max_sp={combo.max_spread_ticks:g} inv={combo.max_inventory:g}"
         )
         body = Table(show_header=True, box=None, padding=(0, 1))
         self._add_header(body)
@@ -406,7 +356,7 @@ class SweepPicker:
         for row_index, row in enumerate(preview, start=1):
             self._add_result_row(body, row_index, row, selected=False)
         if not preview:
-            body.add_row("-", "…", "…", "…", "…", "…", "…", "…", "…", "…", "…", "…", "…", "waiting")
+            body.add_row("-", "…", "…", "…", "…", "…", "…", "…", "…", "…", "waiting")
         layout = Layout(name="root")
         layout.split_column(
             Layout(
@@ -421,7 +371,7 @@ class SweepPicker:
         return layout
 
     def choose(self, rows: list[SweepRow]) -> SweepRow | None:
-        """Arrow/j/k to move, Enter opens equity report, q to quit."""
+        """Arrow/j/k to move, Enter opens full summary, q to quit."""
         if not rows:
             return None
         self._index = 0
@@ -442,22 +392,7 @@ class SweepPicker:
 
     def show_report(self, row: SweepRow) -> str:
         """Static equity + daily PnL page. Returns 'replay', 'back', or 'quit'."""
-        report = ResultReport(self.symbol, self.date, row)
-        with Live(report.render(), refresh_per_second=8, screen=True) as live:
-            while True:
-                if msvcrt.kbhit():
-                    action = _read_key()
-                    if action == "enter" or action == "r":
-                        return "replay"
-                    if action == "b" or action == "quit":
-                        # b = back to grid handled by caller; quit exits
-                        return "back" if action == "b" else "quit"
-                    if action == "up":
-                        report.scroll(-1)
-                    elif action == "down":
-                        report.scroll(1)
-                    live.update(report.render())
-                time.sleep(0.05)
+        return show_result_report(ResultReport.from_sweep_row(self.symbol, self.date, row))
 
     def _render(self, rows: list[SweepRow]) -> Layout:
         if self._index < self._offset:
@@ -482,9 +417,6 @@ class SweepPicker:
         detail.add_row("min_spread", f"{combo.min_spread:.8f}")
         detail.add_row("max_spread_ticks", f"{combo.max_spread_ticks:g}")
         detail.add_row("max_inventory", f"{combo.max_inventory:g}")
-        detail.add_row("skew_ticks", f"{combo.skew_ticks:g}")
-        detail.add_row("book_skew_ticks", f"{combo.book_skew_ticks:g}")
-        detail.add_row("book_skew_w", f"{combo.book_skew_size_weight:g}")
         detail.add_row("tick_size", f"{self.tick_size:.8f}")
         detail.add_row("horizon (s)", f"{self.horizon:g}")
         detail.add_row("maker_fee", f"{self.maker_fee:g}")
@@ -506,7 +438,7 @@ class SweepPicker:
         help_text = (
             f"{self.symbol} {self.date}   resample={self.every}   "
             f"{len(rows)} combinations (sorted by marked PnL)\n"
-            "↑/↓ or j/k select   Enter = equity + daily PnL   q quit"
+            "↑/↓ or j/k select   Enter = summary (PnL + equity)   q quit"
         )
         layout = Layout(name="root")
         layout.split_column(
@@ -526,9 +458,6 @@ class SweepPicker:
         table.add_column("min_sp", justify="right")
         table.add_column("max_sp", justify="right")
         table.add_column("max_inv", justify="right")
-        table.add_column("skew", justify="right")
-        table.add_column("book", justify="right")
-        table.add_column("w", justify="right")
         table.add_column("fills", justify="right")
         table.add_column("inventory", justify="right")
         table.add_column("cash", justify="right")
@@ -552,9 +481,6 @@ class SweepPicker:
                 f"{row.combo.min_spread:g}",
                 f"{row.combo.max_spread_ticks:g}",
                 f"{row.combo.max_inventory:g}",
-                f"{row.combo.skew_ticks:g}",
-                f"{row.combo.book_skew_ticks:g}",
-                f"{row.combo.book_skew_size_weight:g}",
                 "-",
                 "-",
                 "-",
@@ -570,9 +496,6 @@ class SweepPicker:
                 f"{row.combo.min_spread:g}",
                 f"{row.combo.max_spread_ticks:g}",
                 f"{row.combo.max_inventory:g}",
-                f"{row.combo.skew_ticks:g}",
-                f"{row.combo.book_skew_ticks:g}",
-                f"{row.combo.book_skew_size_weight:g}",
                 str(result.fills),
                 f"{result.final_inventory:.4f}",
                 f"{result.cash:.4f}",
@@ -583,111 +506,168 @@ class SweepPicker:
 
 
 def _ascii_equity(values: list[float], width: int = 72, height: int = 12) -> str:
-    """Render a filled ASCII equity chart."""
+    """Render equity as an ASCII line chart."""
     if not values:
         return "(no equity samples)"
     width = max(10, width)
     height = max(4, height)
     if len(values) == 1:
-        values = values + values
-    step = max(1, len(values) // width)
-    series = values[::step][:width]
-    while len(series) < width:
-        series.append(series[-1])
+        values = [values[0], values[0]]
+
+    xs = [i * (len(values) - 1) / (width - 1) for i in range(width)]
+    series: list[float] = []
+    for x in xs:
+        left = int(x)
+        right = min(left + 1, len(values) - 1)
+        frac = x - left
+        series.append(values[left] * (1.0 - frac) + values[right] * frac)
+
     lo = min(series)
     hi = max(series)
-    if hi == lo:
-        mid_row = height // 2
-        lines = []
-        for row in range(height):
-            ch = "#" if row == mid_row else " "
-            lines.append(f"{lo:10.2f} |" + (ch * width))
-        return "\n".join(lines)
+    span = hi - lo if hi != lo else 1.0
+
+    def row_of(value: float) -> int:
+        return int(round((hi - value) / span * (height - 1)))
+
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    points = [row_of(v) for v in series]
+    for col in range(width - 1):
+        r0, r1 = points[col], points[col + 1]
+        steps = max(abs(r1 - r0), 1)
+        for step in range(steps + 1):
+            t = step / steps
+            r = int(round(r0 + (r1 - r0) * t))
+            c = col if step < steps else col + 1
+            if 0 <= r < height:
+                if r0 == r1:
+                    grid[r][c] = "-"
+                elif r1 < r0:
+                    grid[r][c] = "/"
+                else:
+                    grid[r][c] = "\\"
+    for col, r in enumerate(points):
+        if 0 <= r < height:
+            grid[r][col] = "*"
 
     lines: list[str] = []
     for row in range(height):
-        level = hi - (hi - lo) * row / (height - 1)
-        next_level = hi - (hi - lo) * (row + 1) / (height - 1) if row + 1 < height else lo - 1
-        chars: list[str] = []
-        for value in series:
-            if value >= level:
-                chars.append("#")
-            elif value >= next_level:
-                chars.append(".")
-            else:
-                chars.append(" ")
-        label = f"{level:10.2f}"
-        lines.append(f"{label} |" + "".join(chars))
-    axis = " " * 11 + "+" + ("-" * width)
-    first = str(values[0])
-    last = str(values[-1])
-    footer = " " * 12 + f"start={series[0]:.2f}   end={series[-1]:.2f}   min={lo:.2f}   max={hi:.2f}"
-    return "\n".join(lines + [axis, footer])
+        level = hi - span * row / (height - 1)
+        lines.append(f"{level:10.2f} |{''.join(grid[row])}")
+    lines.append(" " * 11 + "+" + ("-" * width))
+    lines.append(
+        " " * 12
+        + f"start={series[0]:.2f}   end={series[-1]:.2f}   "
+        + f"min={lo:.2f}   max={hi:.2f}"
+    )
+    return "\n".join(lines)
 
 
 class ResultReport:
-    """Static equity curve + daily PnL page after picking a grid combo."""
+    """Pre-replay page: summary, daily PnL, equity line, fills. Enter → replay."""
 
-    def __init__(self, symbol: str, date: str, row: SweepRow) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        date: str,
+        result,
+        *,
+        gamma: float,
+        kappa: float,
+        min_spread: float,
+        max_spread_ticks: float,
+        max_inventory: float,
+        error: str | None = None,
+        allow_back: bool = False,
+    ) -> None:
         self.symbol = symbol
         self.date = date
-        self.row = row
+        self.result = result
+        self.gamma = gamma
+        self.kappa = kappa
+        self.min_spread = min_spread
+        self.max_spread_ticks = max_spread_ticks
+        self.max_inventory = max_inventory
+        self.error = error
+        self.allow_back = allow_back
         self._daily_offset = 0
-        self._visible_days = 14
+        self._fill_offset = 0
+        self._visible_days = 12
+        self._visible_fills = 10
+
+    @classmethod
+    def from_sweep_row(cls, symbol: str, date: str, row: SweepRow) -> "ResultReport":
+        combo = row.combo
+        return cls(
+            symbol,
+            date,
+            row.result,
+            gamma=combo.gamma,
+            kappa=combo.kappa,
+            min_spread=combo.min_spread,
+            max_spread_ticks=combo.max_spread_ticks,
+            max_inventory=combo.max_inventory,
+            error=row.error,
+            allow_back=True,
+        )
 
     def scroll(self, delta: int) -> None:
-        days = len(self.row.result.daily_pnl) if not self.row.error else 0
-        if days <= self._visible_days:
-            self._daily_offset = 0
-            return
-        self._daily_offset = max(
-            0,
-            min(days - self._visible_days, self._daily_offset + delta),
-        )
+        days = 0 if self.error else len(self.result.daily_pnl)
+        if days > self._visible_days:
+            self._daily_offset = max(
+                0,
+                min(days - self._visible_days, self._daily_offset + delta),
+            )
+        fills = 0 if self.error else len(self.result.execution.fills)
+        if fills > self._visible_fills:
+            self._fill_offset = max(
+                0,
+                min(fills - self._visible_fills, self._fill_offset + delta),
+            )
 
     def render(self) -> Layout:
-        combo = self.row.combo
+        controls = (
+            "Enter/r = live replay   ↑/↓ scroll   q = quit"
+            if not self.allow_back
+            else "Enter/r = live replay   b = back to grid   ↑/↓ scroll   q = quit"
+        )
         header = (
             f"{self.symbol}  {self.date}\n"
-            f"gamma={combo.gamma:g}  kappa={combo.kappa:g}  "
-            f"min={combo.min_spread:g}  max_sp={combo.max_spread_ticks:g}  "
-            f"inv={combo.max_inventory:g}  "
-            f"skew={combo.skew_ticks:g}  book={combo.book_skew_ticks:g}  "
-            f"w={combo.book_skew_size_weight:g}\n"
-            "Enter/r = live replay   b = back to grid   q = quit   ↑/↓ scroll days"
+            f"gamma={self.gamma:g}  kappa={self.kappa:g}  "
+            f"min={self.min_spread:g}  max_sp={self.max_spread_ticks:g}  "
+            f"inv={self.max_inventory:g}\n"
+            f"{controls}"
         )
 
-        if self.row.error:
-            body = Panel(f"ERROR: {self.row.error}", title="Result")
+        if self.error:
+            body = Panel(f"ERROR: {self.error}", title="Result")
             layout = Layout(name="root")
             layout.split_column(
-                Layout(Panel(header, title="Combo Report"), size=6),
+                Layout(Panel(header, title="Backtest Report"), size=6),
                 Layout(body),
             )
             return layout
 
-        result = self.row.result
+        result = self.result
         summary = Table(show_header=False, box=None, padding=(0, 1))
         summary.add_column("Name", style="bold cyan")
         summary.add_column("Value", justify="right")
         summary.add_row("fills", str(result.fills))
+        buys = sum(1 for f in result.execution.fills if f.side == "buy")
+        sells = result.fills - buys
+        summary.add_row("buys / sells", f"{buys} / {sells}")
         summary.add_row("inventory", f"{result.final_inventory:.6f}")
         summary.add_row("cash", f"{result.cash:.4f}")
         pos = result.execution.position
         mid = result.last_mid
+        fees = sum(f.fee for f in result.execution.fills)
         summary.add_row("avg entry", f"{pos.avg_entry_price:.8f}")
+        summary.add_row("fees", f"{fees:.4f}")
         summary.add_row("realized PnL", f"{pos.realized_pnl:.4f}")
         summary.add_row("unrealized PnL", f"{pos.unrealized_pnl(mid):.4f}")
         summary.add_row("marked PnL", f"{result.marked_pnl:.4f}")
         summary.add_row("last spread", f"{result.last_spread:.8f}")
         summary.add_row("equity samples", str(len(result.equity_curve)))
         summary.add_row("trading days", str(len(result.daily_pnl)))
-
-        equity_values = [point[1] for point in result.equity_curve]
-        equity_panel = Panel(
-            _ascii_equity(equity_values, width=70, height=14),
-            title="Full Equity Curve (marked PnL)",
-        )
 
         daily = Table(show_header=True, box=None, padding=(0, 1))
         daily.add_column("Date", style="bold cyan")
@@ -702,16 +682,66 @@ class ResultReport:
         if not result.daily_pnl:
             daily.add_row("-", "-", "-")
 
+        fills_table = Table(show_header=True, box=None, padding=(0, 1))
+        fills_table.add_column("Time", style="bold cyan")
+        fills_table.add_column("Side", justify="right")
+        fills_table.add_column("Qty", justify="right")
+        fills_table.add_column("Price", justify="right")
+        fills_table.add_column("Fee", justify="right")
+        fill_window = result.execution.fills[
+            self._fill_offset : self._fill_offset + self._visible_fills
+        ]
+        for fill in fill_window:
+            style = "green" if fill.side == "buy" else "red"
+            fills_table.add_row(
+                str(fill.timestamp)[:19],
+                fill.side,
+                f"{fill.quantity:.4f}",
+                f"{fill.price:.6f}",
+                f"{fill.fee:.4f}",
+                style=style,
+            )
+        if not result.execution.fills:
+            fills_table.add_row("-", "-", "-", "-", "-")
+
+        equity_values = [point[1] for point in result.equity_curve]
+        equity_panel = Panel(
+            _ascii_equity(equity_values, width=78, height=12),
+            title="Equity Curve (marked PnL, line)",
+        )
+
         layout = Layout(name="root")
         layout.split_column(
-            Layout(Panel(header, title="Combo Report"), size=6),
-            Layout(name="mid", size=8),
-            Layout(name="bottom"),
+            Layout(Panel(header, title="Backtest Report — press Enter to replay"), size=5),
+            Layout(name="mid", size=14),
+            Layout(name="fills", size=14),
+            Layout(name="equity"),
         )
         layout["mid"].split_row(
             Layout(Panel(summary, title="Summary"), ratio=1),
             Layout(Panel(daily, title="Daily PnL"), ratio=2),
         )
-        layout["bottom"].update(equity_panel)
+        layout["fills"].update(Panel(fills_table, title="Trades / Fills"))
+        layout["equity"].update(equity_panel)
         return layout
+
+
+def show_result_report(report: ResultReport) -> str:
+    """Interactive report. Returns 'replay', 'back', or 'quit'."""
+    with Live(report.render(), refresh_per_second=8, screen=True) as live:
+        while True:
+            if msvcrt.kbhit():
+                action = _read_key()
+                if action == "enter" or action == "r":
+                    return "replay"
+                if action == "b" and report.allow_back:
+                    return "back"
+                if action == "quit":
+                    return "quit"
+                if action == "up":
+                    report.scroll(-1)
+                elif action == "down":
+                    report.scroll(1)
+                live.update(report.render())
+            time.sleep(0.05)
 

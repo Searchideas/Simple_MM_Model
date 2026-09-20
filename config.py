@@ -8,14 +8,29 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 ### Configuration Parameters
-# Tardis exchange id: "binance-futures" | "gate-io-futures" | "bybit" (Bybit Derivatives = perps + futures)
+# Primary exchange for backtest / loaders (parquet under data/parquet/{Exchange}/)
+# Tardis ids: "binance" | "binance-futures" | "mexc-futures" | "gate-io-futures" | "bybit"
 Exchange = "binance-futures"
 
-# Local symbols used by download and convert
-Symbols = ["adausdt", "dogeusdt","suiusdt"]
+# Local symbols for the primary Exchange (backtest default)
+Symbols = ["suiusdc"]
+
+# Multi-venue downloads: (tardis_exchange, local_symbol_keys)
+# USDCUSDT is spot-only as USDTUSDC; SUIUSDC perp lives on binance-futures.
+DOWNLOAD_JOBS: list[tuple[str, list[str]]] = [
+    ("binance", ["usdcusdt"]),
+    ("binance-futures", ["suiusdc"]),
+    ("mexc-futures", ["suiusdt"]),
+]
 
 # Tardis dataset symbol ids per exchange
 SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
+    "binance": {
+        "usdcusdt": "USDCUSDT",
+        "suiusdc": "SUIUSDC",
+        "btcusdt": "BTCUSDT",
+        "suiusdt": "SUIUSDT",
+    },
     "binance-futures": {
         "xauusdt": "XAUUSDT",
         "xautusdt": "XAUTUSDT",
@@ -24,6 +39,13 @@ SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
         "suiusdt": "SUIUSDT",
         "adausdt": "ADAUSDT",
         "dogeusdt": "DOGEUSDT",
+        "usdcusdt": "USDCUSDT",
+        "suiusdc": "SUIUSDC",
+    },
+    "mexc-futures": {
+        # MEXC linear perps use underscore ids (SUI_USDT).
+        "suiusdt": "SUI_USDT",
+        "btcusdt": "BTC_USDT",
     },
     "gate-io-futures": {
         "xauusdt": "XAU_USDT",
@@ -75,6 +97,15 @@ RAW_DIR = Output_Path / "raw" / Exchange
 PARQUET_DIR = Output_Path / "parquet" / Exchange
 RESULTS_DIR = PROJECT_ROOT / "results"
 
+
+def raw_dir_for(exchange: str) -> Path:
+    return Output_Path / "raw" / exchange
+
+
+def parquet_dir_for(exchange: str) -> Path:
+    return Output_Path / "parquet" / exchange
+
+
 # Legacy Binance layout (pre–per-exchange folders)
 if Exchange == "binance-futures":
     _legacy_parquet = Output_Path / "parquet"
@@ -90,11 +121,24 @@ data_types = ["trades", "book_snapshot_25"]
 
 # Default fees used by quoter_sim (override per venue / your VIP tier)
 FEE_BY_EXCHANGE = {
+    "binance": {
+        "target_maker": 0.0001,
+        "target_taker": 0.0001,
+        "xau_maker": 0.0001,
+        "xau_taker": 0.0001,
+    },
     "binance-futures": {
         "target_maker": 0.0002,
         "target_taker": 0.0005,
         "xau_maker": 0.0000,
         "xau_taker": 0.0004,
+    },
+    "mexc-futures": {
+        # Often 0/0 on MEXC campaigns — override if your tier differs.
+        "target_maker": 0.0000,
+        "target_taker": 0.0000,
+        "xau_maker": 0.0000,
+        "xau_taker": 0.0000,
     },
     "gate-io-futures": {
         "target_maker": 0.00015,
@@ -113,3 +157,6 @@ FEE_BY_EXCHANGE = {
 
 for _dir in (Output_Path, RAW_DIR, PARQUET_DIR, RESULTS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
+for _ex, _ in DOWNLOAD_JOBS:
+    raw_dir_for(_ex).mkdir(parents=True, exist_ok=True)
+    parquet_dir_for(_ex).mkdir(parents=True, exist_ok=True)

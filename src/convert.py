@@ -65,20 +65,22 @@ def convert_datasets(
     output_dir: Path,
     data_types: list[str] | None = None,
     symbols: list[str] | None = None,
+    exchange: str | None = None,
     force: bool = False,
     delete_raw: bool = True,
 ) -> dict[str, int]:
     """Convert matching csv.gz files under input_dir into parquet."""
     data_types = data_types or config.data_types
+    exchange = exchange or config.Exchange
     symbols = symbols or config.Symbols
 
     counts = {"converted": 0, "skipped": 0, "failed": 0, "deleted": 0}
 
     for symbol in symbols:
         # Tardis file uses exchange dataset id (e.g. XAU_USDT); parquet folder uses local name
-        ds_id = config.dataset_id(symbol)
+        ds_id = config.dataset_id(symbol, exchange)
         for data_type in data_types:
-            pattern = f"{config.Exchange}_{data_type}_*_{ds_id}.csv.gz"
+            pattern = f"{exchange}_{data_type}_*_{ds_id}.csv.gz"
             for raw_path in sorted(input_dir.glob(pattern)):
                 try:
                     result, out_path = convert_file(
@@ -100,11 +102,43 @@ def convert_datasets(
     return counts
 
 
+def convert_jobs(
+    jobs: list[tuple[str, list[str]]] | None = None,
+    data_types: list[str] | None = None,
+    force: bool = False,
+    delete_raw: bool = True,
+) -> dict[str, int]:
+    """Convert all DOWNLOAD_JOBS into per-exchange parquet folders."""
+    jobs = jobs if jobs is not None else list(config.DOWNLOAD_JOBS)
+    totals = {"converted": 0, "skipped": 0, "failed": 0, "deleted": 0}
+    for exchange, symbols in jobs:
+        input_dir = config.raw_dir_for(exchange)
+        output_dir = config.parquet_dir_for(exchange)
+        raw_files = list(input_dir.glob("*.csv.gz"))
+        if not raw_files:
+            print(f"No csv.gz in {input_dir}; skip convert for {exchange}")
+            continue
+        print(f"Converting {input_dir} -> {output_dir}")
+        counts = convert_datasets(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            data_types=data_types,
+            symbols=symbols,
+            exchange=exchange,
+            force=force,
+            delete_raw=delete_raw,
+        )
+        for k, v in counts.items():
+            totals[k] += v
+    return totals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert Tardis csv.gz to parquet")
-    parser.add_argument("--input-dir", type=Path, default=config.RAW_DIR)
-    parser.add_argument("--output-dir", type=Path, default=config.PARQUET_DIR)
-    parser.add_argument("--symbols", nargs="+", default=config.Symbols)
+    parser.add_argument("--input-dir", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--exchange", type=str, default=None)
+    parser.add_argument("--symbols", nargs="+", default=None)
     parser.add_argument("--data-types", nargs="+", default=config.data_types)
     parser.add_argument("--force", action="store_true", help="re-convert even if parquet exists")
     parser.add_argument(
@@ -114,17 +148,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    raw_files = list(args.input_dir.glob("*.csv.gz"))
-    if not raw_files:
-        print(f"No csv.gz files in {args.input_dir}. Run python -m src.download first.")
+    # Default: convert every DOWNLOAD_JOB into its per-exchange parquet dir
+    if args.input_dir is None and args.output_dir is None and args.exchange is None:
+        counts = convert_jobs(
+            data_types=args.data_types,
+            force=args.force,
+            delete_raw=not args.keep_raw,
+        )
+        print(
+            f"Done. converted={counts['converted']} skipped={counts['skipped']} "
+            f"deleted={counts['deleted']} failed={counts['failed']}"
+        )
         return
 
-    print(f"Converting {args.input_dir} -> {args.output_dir}")
+    exchange = args.exchange or config.Exchange
+    input_dir = args.input_dir or config.raw_dir_for(exchange)
+    output_dir = args.output_dir or config.parquet_dir_for(exchange)
+    symbols = args.symbols or config.Symbols
+
+    raw_files = list(input_dir.glob("*.csv.gz"))
+    if not raw_files:
+        print(f"No csv.gz files in {input_dir}. Run python -m src.download first.")
+        return
+
+    print(f"Converting {input_dir} -> {output_dir}")
     counts = convert_datasets(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
+        input_dir=input_dir,
+        output_dir=output_dir,
         data_types=args.data_types,
-        symbols=args.symbols,
+        symbols=symbols,
+        exchange=exchange,
         force=args.force,
         delete_raw=not args.keep_raw,
     )

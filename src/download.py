@@ -44,21 +44,41 @@ def download_data(params: DownloadParams) -> None:
     )
 
 
+def download_jobs(
+    jobs: list[tuple[str, list[str]]] | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    data_types: list[str] | None = None,
+) -> None:
+    """Download each (exchange, local_symbols) job into data/raw/{exchange}/."""
+    jobs = jobs if jobs is not None else list(config.DOWNLOAD_JOBS)
+    from_date = from_date or config.StartDate
+    to_date = to_date or exclusive_end
+    data_types = data_types or config.data_types
+
+    for exchange, local_symbols in jobs:
+        dataset_ids = [config.dataset_id(s, exchange) for s in local_symbols]
+        out_dir = config.raw_dir_for(exchange)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Downloading {exchange}  symbols={dataset_ids}  "
+            f"{from_date} .. {config.EndDate}  -> {out_dir}"
+        )
+        download_data(
+            DownloadParams(
+                exchange=exchange,
+                symbols=dataset_ids,
+                data_types=data_types,
+                from_date=from_date,
+                to_date=to_date,
+                api_key=config.Tardis_API_Key,
+                download_dir=str(out_dir),
+            )
+        )
+        n = len(list(out_dir.glob("*.csv.gz")))
+        print(f"  done ({n} csv.gz files in {out_dir})")
+
+
 if __name__ == "__main__":
-    symbols = config.dataset_symbols()
-    print(
-        f"Downloading {config.Exchange}  symbols={symbols}  "
-        f"{config.StartDate} .. {config.EndDate}  -> {config.RAW_DIR}"
-    )
-    params = DownloadParams(
-        exchange=config.Exchange,
-        symbols=symbols,
-        data_types=config.data_types,
-        from_date=config.StartDate,
-        to_date=exclusive_end,
-        api_key=config.Tardis_API_Key,
-        download_dir=str(config.RAW_DIR),
-    )
-    download_data(params)
-    n = len(list(config.RAW_DIR.glob("*.csv.gz")))
-    print(f"Data downloaded successfully ({n} csv.gz files in {config.RAW_DIR})")
+    download_jobs()
+    print("Data downloaded successfully")

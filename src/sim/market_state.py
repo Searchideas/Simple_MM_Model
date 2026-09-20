@@ -12,7 +12,9 @@ class MarketState:
         timestamp: The time of the market snapshot.
         best_bid: The best bid price in the market.
         best_ask: The best ask price in the market.
-        volatility: An estimate of short-term volatility.
+        volatility: Return volatility σ with units 1/sqrt(second)
+            (use mid·σ for price vol; σ²·τ has units Price² when τ is seconds).
+
         fair_value: Optional fair value or basis information.
     """
     timestamp: datetime
@@ -44,9 +46,17 @@ class MarketState:
 
     @staticmethod
     def calculate_volatility(
-        midprices: list[float], interval_seconds: int
+        midprices: list[float], interval_seconds: float
     ) -> float:
-        """Calculate annualized volatility from equally spaced mid-prices."""
+        """Return volatility σ in 1/sqrt(second) from equally spaced mids.
+
+        From log returns over each ``interval_seconds`` step::
+
+            σ = std(Δln mid) / sqrt(Δt)
+
+        so price variance rate is ``(mid·σ)²`` with units (Price)²/second.
+        Multiply by funding horizon ``T−t`` in seconds for AS ``σ²(T−t)``.
+        """
         if len(midprices) < 3:
             return 0.0
         if interval_seconds <= 0:
@@ -57,8 +67,7 @@ class MarketState:
             raise ValueError("midprices must be positive")
 
         log_returns = np.diff(np.log(prices))
-        periods_per_year = 365 * 24 * 60 * 60 / interval_seconds
-        return float(np.std(log_returns, ddof=1) * np.sqrt(periods_per_year))
+        return float(np.std(log_returns, ddof=1) / np.sqrt(float(interval_seconds)))
 
 
 @dataclass

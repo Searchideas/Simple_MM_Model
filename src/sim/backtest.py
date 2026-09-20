@@ -60,8 +60,9 @@ class Backtest:
         model: AvellanedaStoikovModel,
         execution: ExecutionSimulator,
         volatility_window: int = 300,
-        interval_seconds: int = 1,
-        estimate_kappa: bool = True,
+        interval_seconds: float = 1,
+        kappa_path: pl.DataFrame | None = None,
+        kappa_fallback: float | None = None,
     ) -> None:
         if volatility_window < 3:
             raise ValueError("volatility_window must be at least 3")
@@ -69,13 +70,15 @@ class Backtest:
         self.execution = execution
         self.volatility_window = volatility_window
         self.interval_seconds = interval_seconds
-        self.estimate_kappa = estimate_kappa
-        self._minute_mid: float | None = None
-        self._minute_ts: datetime | None = None
-        self._kappa_distances: list[float] = []
-        self._kappa_fills: list[int] = []
-        self._kappa_exposure: list[float] = []
-        self._kappa_updates = 0
+        self.kappa_path = kappa_path
+        self.kappa_fallback = (
+            float(kappa_fallback)
+            if kappa_fallback is not None
+            else float(model.params.kappa)
+        )
+        if self.kappa_path is not None and not self.kappa_path.is_empty():
+            self.model.estimated_kappa = self.kappa_fallback
+
 
     def run(
         self,
@@ -134,7 +137,14 @@ class Backtest:
                 ask_prices=row.get("ask_prices") or [],
                 ask_volumes=row.get("ask_amounts") or [],
             )
-            self._update_minute_returns(row["ts"], mid_price)
+            if self.kappa_path is not None:
+                from .fill_probabilty import kappa_at_time
+
+                self.model.estimated_kappa = kappa_at_time(
+                    self.kappa_path,
+                    row["ts"],
+                    self.kappa_fallback,
+                )
             quote = self.model.calculate_quotes(
                 market,
                 self.execution.position,
@@ -149,8 +159,6 @@ class Backtest:
                 if index + 1 < len(bbo_rows)
                 else None
             )
-            bid_fills = 0
-            ask_fills = 0
             while trade_index < len(trade_rows):
                 trade = trade_rows[trade_index]
                 if trade["ts"] < row["ts"]:
@@ -167,11 +175,6 @@ class Backtest:
                 )
                 last_trade = trade
                 last_fill = fill
-                if fill is not None:
-                    if fill.side == "buy":
-                        bid_fills += 1
-                    else:
-                        ask_fills += 1
                 trade_index += 1
 
             last_quote = quote
@@ -201,16 +204,6 @@ class Backtest:
             ):
                 equity_curve.append((row["ts"], marked))
                 last_equity_ts = row["ts"]
-
-            if self.estimate_kappa:
-                self._record_kappa_observation(
-                    mid_price=mid_price,
-                    quote=quote,
-                    bid_fills=bid_fills,
-                    ask_fills=ask_fills,
-                    current_ts=row["ts"],
-                    next_ts=next_timestamp,
-                )
 
             if on_update is not None:
                 on_update(
@@ -248,54 +241,3 @@ class Backtest:
             equity_curve=equity_curve,
             daily_pnl=daily_pnl,
         )
-
-    def _update_minute_returns(self, timestamp: datetime, mid_price: float) -> None:
-        """Append a 1-minute mid return / close when at least 60 seconds elapsed."""
-        if self._minute_ts is None or self._minute_mid is None:
-            self._minute_ts = timestamp
-            self._minute_mid = mid_price
-            return
-        elapsed = (timestamp - self._minute_ts).total_seconds()
-        if elapsed < 60.0 or self._minute_mid <= 0:
-            return
-        self.model.params.returns_1m.append(mid_price / self._minute_mid - 1.0)
-        del self.model.params.returns_1m[:-10]
-        self.model.params.closes_1m.append(mid_price)
-        keep = max(int(self.model.params.ma_slow), 25) + 5
-        del self.model.params.closes_1m[:-keep]
-        self._minute_ts = timestamp
-        self._minute_mid = mid_price
-
-    def _record_kappa_observation(
-        self,
-        mid_price: float,
-        quote,
-        bid_fills: int,
-        ask_fills: int,
-        current_ts: datetime,
-        next_ts: datetime | None,
-    ) -> None:
-        """Store quote-distance fill samples and periodically re-estimate kappa."""
-        if next_ts is None:
-            exposure = float(self.interval_seconds)
-        else:
-            exposure = max((next_ts - current_ts).total_seconds(), 1e-6)
-        bid_distance = max(mid_price - quote.bid, 0.0)
-        ask_distance = max(quote.ask - mid_price, 0.0)
-        self._kappa_distances.extend([bid_distance, ask_distance])
-        self._kappa_fills.extend([bid_fills, ask_fills])
-        self._kappa_exposure.extend([exposure, exposure])
-        del self._kappa_distances[:-2000]
-        del self._kappa_fills[:-2000]
-        del self._kappa_exposure[:-2000]
-        self._kappa_updates += 1
-        if self._kappa_updates % 200 != 0:
-            return
-        try:
-            self.model.estimated_kappa = self.model.kappa_calculation(
-                self._kappa_distances,
-                self._kappa_fills,
-                self._kappa_exposure,
-            )
-        except ValueError:
-            return

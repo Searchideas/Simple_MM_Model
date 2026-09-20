@@ -34,8 +34,21 @@ TRADES_PARQUET_COLS = [
 ]
 
 
-def daily_files(symbol: str, data_type: str, from_date: str, to_date: str) -> list[Path]:
-    folder = config.PARQUET_DIR / symbol.lower() / data_type
+def parquet_root(exchange: str | None = None) -> Path:
+    """Parquet root for an exchange (default: config.Exchange)."""
+    if exchange is None:
+        return config.PARQUET_DIR
+    return config.parquet_dir_for(exchange)
+
+
+def daily_files(
+    symbol: str,
+    data_type: str,
+    from_date: str,
+    to_date: str,
+    exchange: str | None = None,
+) -> list[Path]:
+    folder = parquet_root(exchange) / symbol.lower() / data_type
     files = []
     for f in sorted(folder.glob("*.parquet")):
         m = DATE_RE.search(f.name)
@@ -44,10 +57,19 @@ def daily_files(symbol: str, data_type: str, from_date: str, to_date: str) -> li
     return files
 
 
-def load(symbol: str, data_type: str, from_date: str, to_date: str) -> pl.DataFrame:
-    files = daily_files(symbol, data_type, from_date, to_date)
+def load(
+    symbol: str,
+    data_type: str,
+    from_date: str,
+    to_date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    files = daily_files(symbol, data_type, from_date, to_date, exchange=exchange)
     if not files:
-        raise FileNotFoundError(f"No parquet for {symbol}/{data_type} in [{from_date}, {to_date}]")
+        raise FileNotFoundError(
+            f"No parquet for {symbol}/{data_type} in [{from_date}, {to_date}]"
+            + (f" exchange={exchange}" if exchange else "")
+        )
     return pl.read_parquet(files).sort("local_timestamp")
 
 
@@ -75,10 +97,19 @@ def _bbo_from_parquet(path: Path) -> pl.DataFrame:
     )
 
 
-def load_bbo(symbol: str, from_date: str, to_date: str) -> pl.DataFrame:
-    files = daily_files(symbol, "book_snapshot_25", from_date, to_date)
+def load_bbo(
+    symbol: str,
+    from_date: str,
+    to_date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    files = daily_files(
+        symbol, "book_snapshot_25", from_date, to_date, exchange=exchange
+    )
     if not files:
-        raise FileNotFoundError(f"No parquet for {symbol}/book_snapshot_25 in [{from_date}, {to_date}]")
+        raise FileNotFoundError(
+            f"No parquet for {symbol}/book_snapshot_25 in [{from_date}, {to_date}]"
+        )
 
     frames: list[pl.DataFrame] = []
     for i, path in enumerate(files, start=1):
@@ -87,11 +118,21 @@ def load_bbo(symbol: str, from_date: str, to_date: str) -> pl.DataFrame:
     return pl.concat(frames).sort("local_timestamp")
 
 
-def bbo_grid(symbol: str, from_date: str, to_date: str, every: str = "1s") -> pl.DataFrame:
+def bbo_grid(
+    symbol: str,
+    from_date: str,
+    to_date: str,
+    every: str = "1s",
+    exchange: str | None = None,
+) -> pl.DataFrame:
     """Build time grid one day at a time to keep memory low."""
-    files = daily_files(symbol, "book_snapshot_25", from_date, to_date)
+    files = daily_files(
+        symbol, "book_snapshot_25", from_date, to_date, exchange=exchange
+    )
     if not files:
-        raise FileNotFoundError(f"No parquet for {symbol}/book_snapshot_25 in [{from_date}, {to_date}]")
+        raise FileNotFoundError(
+            f"No parquet for {symbol}/book_snapshot_25 in [{from_date}, {to_date}]"
+        )
 
     grids: list[pl.DataFrame] = []
     for i, path in enumerate(files, start=1):
@@ -137,9 +178,13 @@ def aligned_mids(symbols: list[str], from_date: str, to_date: str, every: str = 
     return out.sort("ts").with_columns(pl.exclude("ts").forward_fill()).drop_nulls()
 
 
-def available_dates(symbol: str, data_type: str = "book_snapshot_25") -> list[str]:
+def available_dates(
+    symbol: str,
+    data_type: str = "book_snapshot_25",
+    exchange: str | None = None,
+) -> list[str]:
     """Return sorted YYYY-MM-DD dates that have parquet for this symbol."""
-    folder = config.PARQUET_DIR / symbol.lower() / data_type
+    folder = parquet_root(exchange) / symbol.lower() / data_type
     dates: list[str] = []
     if not folder.exists():
         return dates
@@ -155,11 +200,15 @@ def resolve_date_range(
     date: str = "all",
     from_date: str | None = None,
     to_date: str | None = None,
+    exchange: str | None = None,
 ) -> tuple[str, str, list[str]]:
     """Resolve CLI dates to an inclusive [from, to] range and the list of days."""
-    days = available_dates(symbol)
+    days = available_dates(symbol, exchange=exchange)
     if not days:
-        raise FileNotFoundError(f"No parquet dates for {symbol}")
+        raise FileNotFoundError(
+            f"No parquet dates for {symbol}"
+            + (f" exchange={exchange}" if exchange else "")
+        )
     start = from_date or (days[0] if date == "all" else date)
     end = to_date or (days[-1] if date == "all" else date)
     picked = [day for day in days if start <= day <= end]
@@ -168,8 +217,13 @@ def resolve_date_range(
     return picked[0], picked[-1], picked
 
 
-def load_trades_range(symbol: str, from_date: str, to_date: str) -> pl.DataFrame:
-    files = daily_files(symbol, "trades", from_date, to_date)
+def load_trades_range(
+    symbol: str,
+    from_date: str,
+    to_date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    files = daily_files(symbol, "trades", from_date, to_date, exchange=exchange)
     if not files:
         raise FileNotFoundError(f"No trades for {symbol} in [{from_date}, {to_date}]")
     frames = [
@@ -184,24 +238,34 @@ def load_trades_range(symbol: str, from_date: str, to_date: str) -> pl.DataFrame
     return pl.concat(frames).sort("ts")
 
 
-def load_bbo_range(symbol: str, from_date: str, to_date: str, every: str | None = None) -> pl.DataFrame:
+def load_bbo_range(
+    symbol: str,
+    from_date: str,
+    to_date: str,
+    every: str | None = None,
+    exchange: str | None = None,
+) -> pl.DataFrame:
     """Load books for a date range. ``every`` resamples (needed for multi-day)."""
     if every:
-        return bbo_grid(symbol, from_date, to_date, every=every)
+        return bbo_grid(symbol, from_date, to_date, every=every, exchange=exchange)
     days = [
         day
-        for day in available_dates(symbol)
+        for day in available_dates(symbol, exchange=exchange)
         if from_date <= day <= to_date
     ]
     if not days:
         raise FileNotFoundError(f"No book for {symbol} in [{from_date}, {to_date}]")
     if len(days) == 1:
-        return load_bbo_day(symbol, days[0])
-    return bbo_grid(symbol, from_date, to_date, every="1s")
+        return load_bbo_day(symbol, days[0], exchange=exchange)
+    return bbo_grid(symbol, from_date, to_date, every="1s", exchange=exchange)
 
 
-def load_trades_day(symbol: str, date: str) -> pl.DataFrame:
-    files = daily_files(symbol, "trades", date, date)
+def load_trades_day(
+    symbol: str,
+    date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    files = daily_files(symbol, "trades", date, date, exchange=exchange)
     if not files:
         raise FileNotFoundError(f"No trades for {symbol} on {date}")
     return (
@@ -216,8 +280,12 @@ def load_trades_day(symbol: str, date: str) -> pl.DataFrame:
     )
 
 
-def load_bbo_day(symbol: str, date: str) -> pl.DataFrame:
-    files = daily_files(symbol, "book_snapshot_25", date, date)
+def load_bbo_day(
+    symbol: str,
+    date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    files = daily_files(symbol, "book_snapshot_25", date, date, exchange=exchange)
     if not files:
         raise FileNotFoundError(f"No book for {symbol} on {date}")
     return (
