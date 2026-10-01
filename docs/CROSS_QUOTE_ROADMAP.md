@@ -18,9 +18,9 @@ Optional later: MEXC SUIUSDT hedge (0/0 fees) with basis risk.
 | **0** Spec freeze | planned | Live-parity checklist; v1 vs later knobs |
 | **1** Multi-book event engine | **done** | Sync SUIUSDT + USDCUSDT + SUIUSDC; quote on ref BBO; fill on trade trades |
 | **2** Port live quoting | **done** | AS `enforce_maker=False`, FX+4bps, clamp, soft-inv, cover/join/cut |
-| **3** Fill model ladder | **partial** | A touch/through; **B L25 queue (default)**; C L2/C++ later |
+| **3** Fill model ladder | **partial** | A touch/through; **B L25 queue**; **C event-L2** (`run_event_l2_fair_bt`, Python) |
 | **4** Metrics | **done** | Markout + equity DD + daily win + action attribution (`metrics.py`) |
-| **5** MEXC hedge research | **done** | Basis stats; B2B hedge BT; cut=0 + basis rail; compare vs unhedged |
+| **5** MEXC hedge research | **done** | Basis stats; B2B; hybrid (favorable MEXC else 12% cover + requote when flat) |
 | **6** C++ hot path | planned | Only if Python L25/L2 too slow for sweeps |
 | **7** Live rollout | planned | Dry-run parity → small live → paper MEXC → tiny hedge |
 
@@ -42,8 +42,14 @@ Optional later: MEXC SUIUSDT hedge (0/0 fees) with basis risk.
 # Default = production-aligned guards (queue L25, κ clamp, hard flatten, fee0, vol floor)
 python -m src.sim.run_cross_quote_bt --date all --every 1s
 
-# MEXC B2B hedge (cut=0, basis rail 5bps)
-python -m src.sim.run_cross_quote_hedge_bt --date all --every 1s --fill-mode touch
+# MEXC always-B2B (no favorable filter)
+python -m src.sim.run_cross_quote_hedge_bt --date all --every 1s --fill-mode queue --no-hedge-favorable
+
+# MEXC fair → FX → SUIUSDC maker (1 tick off) → hit MEXC B2B; both-side PnL
+python -m src.sim.run_mexc_fair_hedge_bt --date all --every 1s --fill-mode queue --maker-buffer-ticks 1
+
+# Event-L2 queue + multi-day buffer/skew/fast-move grid
+python -m src.sim.run_event_l2_fair_bt --date all --from-date 2026-08-26 --to-date 2026-09-13 --grid --order-size 10 --max-inventory 50
 
 # Part 5 compare unhedged vs hedge rails
 python -m src.sim.run_part5_hedge_compare --from-date 2026-08-26 --to-date 2026-09-13 --every 5s --fill-mode touch

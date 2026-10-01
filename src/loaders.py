@@ -305,3 +305,75 @@ def load_bbo_day(
         )
         .sort("ts")
     )
+
+
+L2_PARQUET_COLS = [
+    "local_timestamp",
+    "is_snapshot",
+    "side",
+    "price",
+    "amount",
+]
+
+
+def load_incremental_l2_day(
+    symbol: str,
+    date: str,
+    exchange: str | None = None,
+) -> pl.DataFrame:
+    """One day of Tardis incremental_book_L2 updates."""
+    files = daily_files(
+        symbol, "incremental_book_L2", date, date, exchange=exchange
+    )
+    if not files:
+        raise FileNotFoundError(
+            f"No incremental_book_L2 for {symbol} on {date}"
+            + (f" exchange={exchange}" if exchange else "")
+        )
+    return (
+        pl.read_parquet(files[0], columns=L2_PARQUET_COLS)
+        .select(
+            pl.col("local_timestamp").alias("ts"),
+            "is_snapshot",
+            "side",
+            "price",
+            "amount",
+        )
+        .sort("ts")
+    )
+
+
+def merge_l2_and_trades(
+    l2: pl.DataFrame,
+    trades: pl.DataFrame,
+) -> pl.DataFrame:
+    """Merge book updates + trades; trades first on equal timestamps."""
+    book_ev = l2.select(
+        "ts",
+        pl.lit("book").alias("kind"),
+        pl.col("is_snapshot").cast(pl.Boolean),
+        "side",
+        "price",
+        "amount",
+    )
+    trade_ev = trades.select(
+        "ts",
+        pl.lit("trade").alias("kind"),
+        pl.lit(False).alias("is_snapshot"),
+        "side",
+        "price",
+        "amount",
+    )
+    # kind sort: trade < book so trades process first on ties.
+    return (
+        pl.concat([trade_ev, book_ev], how="diagonal_relaxed")
+        .sort(["ts", "kind"])
+        .with_columns(
+            pl.when(pl.col("kind") == "trade")
+            .then(0)
+            .otherwise(1)
+            .alias("_ord")
+        )
+        .sort(["ts", "_ord"])
+        .drop("_ord")
+    )

@@ -9,18 +9,22 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 ### Configuration Parameters
 # Primary exchange for backtest / loaders (parquet under data/parquet/{Exchange}/)
-# Tardis ids: "binance" | "binance-futures" | "mexc-futures" | "gate-io-futures" | "bybit"
+# Tardis ids: "binance" | "binance-futures" | "mexc-futures" | "gate-io-futures" | "bybit" | "hyperliquid"
 Exchange = "binance-futures"
 
 # Local symbols for the primary Exchange (backtest default)
 Symbols = ["suiusdc"]
+
+# Maker stays Binance SUIUSDC. Taker hedge is Hyperliquid SUI perp.
+HEDGE_EXCHANGE = "hyperliquid"
+HEDGE_SYMBOL = "suiusdt"
 
 # Multi-venue downloads: (tardis_exchange, local_symbol_keys)
 # USDCUSDT is spot-only as USDTUSDC; SUIUSDC perp lives on binance-futures.
 DOWNLOAD_JOBS: list[tuple[str, list[str]]] = [
     ("binance", ["usdcusdt"]),
     ("binance-futures", ["suiusdc"]),
-    ("mexc-futures", ["suiusdt"]),
+    (HEDGE_EXCHANGE, [HEDGE_SYMBOL]),
 ]
 
 # Tardis dataset symbol ids per exchange
@@ -55,6 +59,11 @@ SYMBOL_DATASET_IDS: dict[str, dict[str, str]] = {
         "suiusdt": "SUI_USDT",
         "adausdt": "ADA_USDT",
         "dogeusdt": "DOGE_USDT",
+    },
+    # Hyperliquid perps use the coin id (SUI), not SUIUSDT.
+    "hyperliquid": {
+        "suiusdt": "SUI",
+        "btcusdt": "BTC",
     },
     # Bybit linear USDT perpetuals (not inverse *PERP, not dated futures)
     "bybit": {
@@ -145,6 +154,13 @@ FEE_BY_EXCHANGE = {
         "target_taker": 0.0005,
         "xau_maker": 0.00015,
         "xau_taker": 0.0005,
+    },
+    # Hyperliquid perp base taker is about 4.5 bps (no 0-fee promo).
+    "hyperliquid": {
+        "target_maker": 0.00015,
+        "target_taker": 0.00045,
+        "xau_maker": 0.00015,
+        "xau_taker": 0.00045,
     },
     # Bybit USDT perpetual non-VIP-ish defaults
     "bybit": {

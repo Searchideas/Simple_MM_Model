@@ -15,7 +15,7 @@ import polars as pl
 from .cross_quote import CrossQuoteDecision, CrossQuoteParams, build_cross_quote
 from .execution import ExecutionSimulator, Fill
 from .markout import MarkoutReport, MarkoutTracker
-from .market_state import MarketState
+from .market_state import MarketState, PositionState
 from .metrics import CrossQuoteMetrics, build_metrics
 from .mexc_hedge import MexcTakerHedge
 from .quoting_logic import AvellanedaStoikovModel
@@ -48,6 +48,7 @@ class MultiBookResult:
     hedge_skipped_basis: int = 0
     hedge_skipped_unfavorable: int = 0
     hedge_partial_qty: float = 0.0
+    hedge_residual_clears: int = 0
     bn_marked_pnl: float = 0.0
     combined_marked_pnl: float = 0.0
     net_sui: float = 0.0
@@ -157,6 +158,8 @@ class MultiBookBacktest:
         kappa_fallback: float | None = None,
         markout_horizon_seconds: float = 1.0,
         hedge: MexcTakerHedge | None = None,
+        hedge_hybrid: bool = False,
+        residual_cut_roi_pct: float = 12.0,
     ) -> None:
         self.model = model
         self.execution = execution
@@ -171,6 +174,10 @@ class MultiBookBacktest:
         )
         self.markout_horizon_seconds = markout_horizon_seconds
         self.hedge = hedge
+        # Hybrid race: monitor MEXC residual clear + pure-BN cover ladder on BN
+        # inventory until net flat; then requote both sides (cut off).
+        self.hedge_hybrid = bool(hedge_hybrid and hedge is not None)
+        self.residual_cut_roi_pct = float(residual_cut_roi_pct)
         if self.kappa_path is not None and not self.kappa_path.is_empty():
             self.model.estimated_kappa = self.kappa_fallback
 
@@ -271,14 +278,60 @@ class MultiBookBacktest:
                 best_ask_volume=float(row.get("ref_ask_qty") or 0.0),
                 volatility=vol,
             )
+
+            # Hybrid: keep monitoring MEXC; hedge residual when price is OK.
+            if self.hedge is not None and self.hedge_hybrid:
+                hb = row.get("hedge_bid_prices")
+                ha = row.get("hedge_bid_amounts")
+                hap = row.get("hedge_ask_prices")
+                haa = row.get("hedge_ask_amounts")
+                entry = self.execution.position.avg_entry_price
+                thresh = (
+                    entry * fx_mid
+                    if entry > 0 and fx_mid > 0
+                    else ref_mid
+                )
+                self.hedge.try_clear_residual(
+                    self.execution.position.inventory,
+                    threshold_usdt=thresh,
+                    mx_bid=float(row.get("hedge_bid") or 0.0),
+                    mx_ask=float(row.get("hedge_ask") or 0.0),
+                    mx_mid=float(row.get("hedge_mid") or 0.0),
+                    ts=ts,
+                    bid_prices=list(hb) if hb is not None else None,
+                    bid_amounts=list(ha) if ha is not None else None,
+                    ask_prices=list(hap) if hap is not None else None,
+                    ask_amounts=list(haa) if haa is not None else None,
+                )
+
+            bn_inv = self.execution.position.inventory
+            net_inv = (
+                self.hedge.net_sui(bn_inv) if self.hedge is not None else bn_inv
+            )
+            # Hybrid residual: pure-BN cover on BN inventory (race vs MEXC).
+            # Hybrid flat (net≈0): quote as flat / cut off even if BN leg open.
+            residual = self.hedge_hybrid and abs(net_inv) >= 0.05
+            if self.hedge_hybrid and not residual:
+                q_quote = 0.0
+                as_position = PositionState(
+                    inventory=0.0,
+                    avg_entry_price=0.0,
+                    cash=self.execution.position.cash,
+                    realized_pnl=self.execution.position.realized_pnl,
+                )
+                avg_entry_for_cover = 0.0
+            else:
+                q_quote = bn_inv
+                as_position = self.execution.position
+                avg_entry_for_cover = self.execution.position.avg_entry_price
+
             as_quote = self.model.calculate_quotes(
                 market,
-                self.execution.position,
+                as_position,
                 enforce_maker=False,
             )
 
-            q = self.execution.position.inventory
-            if abs(q) < 0.05:
+            if abs(q_quote) < 0.05:
                 inventory_open_ts = None
             elif inventory_open_ts is None:
                 inventory_open_ts = ts
@@ -288,14 +341,35 @@ class MultiBookBacktest:
                 else 0.0
             )
 
+            # Residual → same cut/trail as pure BN; net flat → cut off, requote.
+            quote_params = self.cross_params
+            if self.hedge_hybrid:
+                cut = self.residual_cut_roi_pct if residual else 0.0
+                quote_params = CrossQuoteParams(
+                    reference_basis_bps=self.cross_params.reference_basis_bps,
+                    maker_safety_ticks=self.cross_params.maker_safety_ticks,
+                    fx_max_age_seconds=self.cross_params.fx_max_age_seconds,
+                    soft_inventory_lots=self.cross_params.soft_inventory_lots,
+                    cover_join_roi_pct=self.cross_params.cover_join_roi_pct,
+                    cover_cut_roi_pct=cut,
+                    cover_trail_roi_pct=self.cross_params.cover_trail_roi_pct,
+                    cover_join_leverage=self.cross_params.cover_join_leverage,
+                    cover_max_hold_seconds=self.cross_params.cover_max_hold_seconds,
+                    trade_tick=self.cross_params.trade_tick,
+                    vol_floor=self.cross_params.vol_floor,
+                    order_size=self.cross_params.order_size,
+                    max_inventory=self.cross_params.max_inventory,
+                    hard_flatten_at_max=self.cross_params.hard_flatten_at_max,
+                )
+
             decision = build_cross_quote(
                 as_quote=as_quote,
-                inventory=q,
-                avg_entry=self.execution.position.avg_entry_price,
+                inventory=q_quote,
+                avg_entry=avg_entry_for_cover,
                 trade_bid=trade_bid,
                 trade_ask=trade_ask,
                 fx_mid=fx_mid,
-                params=self.cross_params,
+                params=quote_params,
                 inventory_open_age_seconds=hold_s,
             )
             last_decision = decision
@@ -382,12 +456,37 @@ class MultiBookBacktest:
                             mx_ask=float(row.get("hedge_ask") or 0.0),
                             mx_mid=float(row.get("hedge_mid") or 0.0),
                             bn_usdt_mid=ref_mid,
+                            fx_mid=fx_mid,
                             bid_prices=list(hb) if hb is not None else None,
                             bid_amounts=list(ha) if ha is not None else None,
                             ask_prices=list(hap) if hap is not None else None,
                             ask_amounts=list(haa) if haa is not None else None,
                         )
-                    if abs(self.execution.position.inventory) >= 0.05:
+                        if self.hedge_hybrid:
+                            entry = self.execution.position.avg_entry_price
+                            thresh = (
+                                entry * fx_mid
+                                if entry > 0 and fx_mid > 0
+                                else (fill.price * fx_mid if fx_mid > 0 else ref_mid)
+                            )
+                            self.hedge.try_clear_residual(
+                                self.execution.position.inventory,
+                                threshold_usdt=thresh,
+                                mx_bid=float(row.get("hedge_bid") or 0.0),
+                                mx_ask=float(row.get("hedge_ask") or 0.0),
+                                mx_mid=float(row.get("hedge_mid") or 0.0),
+                                ts=fill.timestamp,
+                                bid_prices=list(hb) if hb is not None else None,
+                                bid_amounts=list(ha) if ha is not None else None,
+                                ask_prices=list(hap) if hap is not None else None,
+                                ask_amounts=list(haa) if haa is not None else None,
+                            )
+                    net_now = (
+                        self.hedge.net_sui(self.execution.position.inventory)
+                        if self.hedge is not None
+                        else self.execution.position.inventory
+                    )
+                    if abs(net_now) >= 0.05:
                         if inventory_open_ts is None:
                             inventory_open_ts = trade["ts"]
                     else:
@@ -494,6 +593,7 @@ class MultiBookBacktest:
             hedge_skipped_basis=hedge.skipped_basis if hedge else 0,
             hedge_skipped_unfavorable=hedge.skipped_unfavorable if hedge else 0,
             hedge_partial_qty=hedge.partial_qty if hedge else 0.0,
+            hedge_residual_clears=hedge.residual_clears if hedge else 0,
             bn_marked_pnl=bn_final,
             combined_marked_pnl=final_pnl,
             net_sui=(

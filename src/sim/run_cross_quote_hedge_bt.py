@@ -70,7 +70,7 @@ def main() -> None:
     parser.add_argument("--ref-exchange", default="binance-futures")
     parser.add_argument("--trade-exchange", default="binance-futures")
     parser.add_argument("--fx-exchange", default="binance")
-    parser.add_argument("--hedge-exchange", default="mexc-futures")
+    parser.add_argument("--hedge-exchange", default="hyperliquid")
     parser.add_argument("--date", default="all")
     parser.add_argument("--from-date", default=None)
     parser.add_argument("--to-date", default=None)
@@ -97,6 +97,20 @@ def main() -> None:
         "--no-hedge-favorable",
         action="store_true",
         help="Disable directional L25 filter (always hit bid/lift ask)",
+    )
+    parser.add_argument(
+        "--hedge-hybrid",
+        action="store_true",
+        help=(
+            "Race: favorable MEXC hedge (keep monitoring) + pure-BN cover "
+            "ladder on BN to close; requote both sides when net flat"
+        ),
+    )
+    parser.add_argument(
+        "--residual-cut-roi-pct",
+        type=float,
+        default=12.0,
+        help="While hybrid residual open: same cut%% as pure BN (default 12 @ lev)",
     )
     parser.add_argument("--max-inventory", type=float, default=50.0)
     parser.add_argument("--order-size", type=float, default=10.0)
@@ -150,7 +164,8 @@ def main() -> None:
         f"{label} every={args.every} fill_mode={args.fill_mode} "
         f"hedge_taker={args.hedge_taker_fee} "
         f"max_basis_bps={args.hedge_max_basis_bps} "
-        f"favorable={not args.no_hedge_favorable} cut={args.cover_cut_roi_pct}",
+        f"favorable={not args.no_hedge_favorable} hybrid={args.hedge_hybrid} "
+        f"residual_cut={args.residual_cut_roi_pct} cut={args.cover_cut_roi_pct}",
         flush=True,
     )
 
@@ -249,10 +264,14 @@ def main() -> None:
         max_inventory=args.max_inventory,
         hard_flatten_at_max=not args.no_hard_flatten,
     )
+    # Hybrid: favorable MEXC + pure-BN cover race on BN inventory.
+    favorable = not args.no_hedge_favorable
+    if args.hedge_hybrid:
+        favorable = True
     hedge = MexcTakerHedge(
         taker_fee_rate=args.hedge_taker_fee,
         max_basis_bps=args.hedge_max_basis_bps,
-        favorable_only=not args.no_hedge_favorable,
+        favorable_only=favorable,
     )
     bt = MultiBookBacktest(
         model=model,
@@ -264,6 +283,8 @@ def main() -> None:
         kappa_fallback=kappa,
         markout_horizon_seconds=args.markout_horizon,
         hedge=hedge,
+        hedge_hybrid=args.hedge_hybrid,
+        residual_cut_roi_pct=args.residual_cut_roi_pct,
     )
     result = bt.run(timeline, trades)
 
@@ -275,6 +296,7 @@ def main() -> None:
         f"skipped_book={result.hedge_skipped} skipped_basis={result.hedge_skipped_basis} "
         f"skipped_unfav={result.hedge_skipped_unfavorable} "
         f"partial_qty={result.hedge_partial_qty:.4f} "
+        f"residual_clears={result.hedge_residual_clears} "
         f"net_sui={result.net_sui:.4f} "
         f"COMBINED_pnl_usdc={result.combined_marked_pnl:+.6f} "
         f"fill_mode={result.fill_mode}",
