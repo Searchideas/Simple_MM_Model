@@ -57,6 +57,9 @@ class QuoteParameters:
     include_kappa_spread: bool = True
     kappa_min: float = 0.05
     kappa_max: float = 0.5
+    # Pull the toxic side when touch imbalance is this extreme.
+    # Positive OBI means the next mid tends to rise, so the ask is toxic.
+    obi_pull_level: float = 0.8
 
 
 @dataclass
@@ -75,6 +78,7 @@ class Quote:
     tau_seconds: float = 0.0
     vol_spread: float = 0.0
     kappa_spread: float = 0.0
+    obi: float = 0.0
 
 
 class AvellanedaStoikovModel:
@@ -155,11 +159,23 @@ class AvellanedaStoikovModel:
             # Direct-symbol quoting: may improve inside the spread, never cross.
             bid = min(bid, market_state.best_ask - tick)
             ask = max(ask, market_state.best_bid + tick)
+        if bid >= ask:
+            bid = self._round_down(market_state.best_bid)
+            ask = self._round_up(market_state.best_ask)
             if bid >= ask:
-                bid = self._round_down(market_state.best_bid)
-                ask = self._round_up(market_state.best_ask)
-                if bid >= ask:
-                    ask = bid + tick
+                ask = bid + tick
+
+        obi = _touch_obi(market_state.best_bid_volume, market_state.best_ask_volume)
+        bid_enabled = True
+        ask_enabled = True
+        action = "QUOTE"
+        pull = self.params.obi_pull_level
+        if pull > 0 and obi >= pull:
+            ask_enabled = False
+            action = "PULL_ASK"
+        elif pull > 0 and obi <= -pull:
+            bid_enabled = False
+            action = "PULL_BID"
 
         return Quote(
             bid=bid,
@@ -168,12 +184,13 @@ class AvellanedaStoikovModel:
             spread=ask - bid,
             gamma=gamma,
             kappa=kappa_ticks,
-            action="QUOTE",
-            bid_enabled=True,
-            ask_enabled=True,
+            action=action,
+            bid_enabled=bid_enabled,
+            ask_enabled=ask_enabled,
             tau_seconds=tau_seconds,
             vol_spread=vol_spread,
             kappa_spread=kappa_spread,
+            obi=obi,
         )
 
     def _round_down(self, price: float) -> float:
@@ -181,3 +198,11 @@ class AvellanedaStoikovModel:
 
     def _round_up(self, price: float) -> float:
         return math.ceil(price / self.params.tick_size) * self.params.tick_size
+
+
+def _touch_obi(bid_volume: float, ask_volume: float) -> float:
+    """Level-1 imbalance. Positive when the bid is larger than the ask."""
+    total = bid_volume + ask_volume
+    if total <= 0:
+        return 0.0
+    return (bid_volume - ask_volume) / total
